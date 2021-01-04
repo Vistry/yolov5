@@ -13,27 +13,11 @@ from utils.torch_utils import select_device, time_synchronized
 
 
 def benchmark(data,
-             weights=None,
+             model,
+              device,
+              half,
              batch_size=32,
              imgsz=640):  # number of logged images
-
-        # Initialize/load model and set device
-        device = select_device(opt.device, batch_size=batch_size)
-
-        # Load model
-        model = attempt_load(weights, map_location=device)  # load FP32 model
-        imgsz = check_img_size(imgsz, s=model.stride.max())  # check img_size
-
-        # Half
-        half = device.type != 'cpu'  # half precision only supported on CUDA
-        if half:
-            model.half()
-
-        # Configure
-        model.eval()
-        with open(data) as f:
-            data = yaml.load(f, Loader=yaml.FullLoader)  # model dict
-        check_dataset(data)  # check
 
         # Dataloader
         img = torch.zeros((1, 3, imgsz, imgsz), device=device)  # init img
@@ -43,8 +27,7 @@ def benchmark(data,
 
         seen = 0
         s = f'Computing benchmarks for batch size: {batch_size}'
-        p, r, f1, mp, mr, map50, map, t0, t1 = 0., 0., 0., 0., 0., 0., 0., 0., 0.
-        loss = torch.zeros(3, device=device)
+        t0, t1 = 0., 0.
         for batch_i, (img, targets, paths, shapes) in enumerate(tqdm(dataloader, desc=s)):
             img = img.to(device, non_blocking=True)
             img = img.half() if half else img.float()  # uint8 to fp16/32
@@ -58,9 +41,6 @@ def benchmark(data,
                 inf_out, train_out = model(img, augment=False)  # inference and training outputs
                 t0 += time_synchronized() - t
 
-                # Compute loss
-                loss += compute_loss([x.float() for x in train_out], targets, model)[1][:3]  # box, obj, cls
-
                 # Run NMS
                 targets[:, 2:] *= torch.Tensor([width, height, width, height]).to(device)  # to pixels
                 t = time_synchronized()
@@ -69,11 +49,34 @@ def benchmark(data,
             seen+=1
 
         # Print speeds
-        t = tuple(x / seen * 1E3 for x in (t0, t1, t0 + t1)) + (imgsz, imgsz, batch_size)  # tuple
+        t = tuple(x / seen / batch_size * 1E3 for x in (t0, t1, t0 + t1)) + (imgsz, imgsz, batch_size)  # tuple
         print('Speed: %.1f/%.1f/%.1f ms inference/NMS/total per %gx%g image at batch-size %g' % t)
-
         return t
 
+def run_benchmarks(data, weights, batch_sizes, imgsz=640):
+    # Initialize/load model and set device
+    device = select_device(opt.device)
+
+    # Load model
+    model = attempt_load(weights, map_location=device)  # load FP32 model
+
+    # Half
+    half = device.type != 'cpu'  # half precision only supported on CUDA
+    if half:
+        model.half()
+
+    # Configure
+    model.eval()
+    with open(data) as f:
+        data = yaml.load(f, Loader=yaml.FullLoader)  # model dict
+    check_dataset(data)  # check
+
+    for batch_size in batch_sizes:  # img-size
+        t = benchmark(data=data,
+                        model=model,
+                        device=device,
+                        half=half,
+                        batch_size=batch_size)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(prog='test.py')
@@ -101,8 +104,6 @@ if __name__ == '__main__':
     print(opt)
 
     batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128]
-    for batch_size in batch_sizes:  # img-size
-        r, _, t = benchmark(data=opt.data,
-                            weights=opt.weights,
-                            batch_size=batch_size)
+    run_benchmarks(opt.data, opt.weights, batch_sizes)
+
 # python benchmark.py --source /Users/gabrielibagon/repos/ProductTracker/data/videos/0000000000000158410.mp4 --weights /Users/gabrielibagon/repos/ProductTracker/sagemaker/container/yolov5/weights/yolov5s.pt
